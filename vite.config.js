@@ -4,7 +4,7 @@ import { existsSync, createReadStream } from "fs";
 import { join } from "path";
 
 export default defineConfig({
-  base: "/redactedclub/",
+  base: "/",
   plugins: [
     {
       name: "serve-nft-images",
