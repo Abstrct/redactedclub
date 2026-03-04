@@ -98,14 +98,17 @@ async function createClientWithFallback(keplrOfflineSigner, address) {
         encryptionUtils: window.keplr.getEnigmaUtils(CHAIN_ID),
       });
 
-      const hashResult = await client.query.compute.codeHashByContractAddress({
-        contract_address: CONTRACT_ADDRESS,
-      });
+      const hashResult =
+        await client.query.compute.codeHashByContractAddress({
+          contract_address: CONTRACT_ADDRESS,
+        });
 
       codeHash =
         typeof hashResult === "string"
           ? hashResult
-          : hashResult?.code_hash || hashResult?.codeHash || String(hashResult);
+          : hashResult?.code_hash ||
+            hashResult?.codeHash ||
+            String(hashResult);
       console.log(`Connected to ${url}, code hash: ${codeHash}`);
       return client;
     } catch (e) {
@@ -312,7 +315,8 @@ function renderNFTs(tokens) {
     card.className = "nft-card";
 
     const img = document.createElement("img");
-    img.src = `/allBunnies/${tokenId}.webp`;
+    const base = import.meta.env.BASE_URL;
+    img.src = `${base}allBunnies/${tokenId}.webp`;
     img.alt = `Redacted Club #${tokenId}`;
     img.loading = "lazy";
     img.onerror = () => {
