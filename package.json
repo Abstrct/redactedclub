@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "fetch-metadata": "node scripts/fetch-metadata.js"
   },
   "dependencies": {
     "secretjs": "^1.22.1"

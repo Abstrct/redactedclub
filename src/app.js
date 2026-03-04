@@ -7,27 +7,47 @@ const LCD_URLS = [
   "https://secret.api.trivium.network:1317",
 ];
 const VK_STORAGE_KEY = "redacted-club-vk";
+const TOTAL_TOKENS = 1337;
+const BASE = import.meta.env.BASE_URL;
 
 const $ = (sel) => document.querySelector(sel);
-const hero = $("#hero");
 const loading = $("#loading");
 const loadingText = $("#loading-text");
 const errorDiv = $("#error");
 const emptyState = $("#empty");
-const statusBar = $("#status-bar");
 const nftGrid = $("#nft-grid");
-const nftCount = $("#nft-count");
+const resultCount = $("#result-count");
+const totalCount = $("#total-count");
 const btnConnect = $("#btn-connect");
-const btnConnectHero = $("#btn-connect-hero");
+const btnMyNfts = $("#btn-my-nfts");
 const btnDisconnect = $("#btn-disconnect");
 const addressBadge = $("#address-badge");
 const addressText = $("#address-text");
 const vkSetup = $("#vk-setup");
 const btnSetVk = $("#btn-set-vk");
+const filterList = $("#filter-list");
+const btnClearFilters = $("#btn-clear-filters");
+const searchInput = $("#search-input");
+const modalOverlay = $("#modal-overlay");
+const modalImage = $("#modal-image");
+const modalName = $("#modal-name");
+const modalId = $("#modal-id");
+const modalTraits = $("#modal-traits");
+const modalClose = $("#modal-close");
+const sidebar = $("#sidebar");
+const sidebarToggle = $("#sidebar-toggle");
 
 let secretjs = null;
 let myAddress = null;
 let codeHash = null;
+let metadata = {};
+let hasMetadata = false;
+let ownedTokens = new Set();
+let showOnlyOwned = false;
+let activeFilters = {};
+let searchQuery = "";
+
+const allTokenIds = Array.from({ length: TOTAL_TOKENS }, (_, i) => i);
 
 function show(el) {
   el.classList.add("visible");
@@ -38,14 +58,6 @@ function hide(el) {
 function showError(msg) {
   errorDiv.textContent = msg;
   show(errorDiv);
-}
-function hideAll() {
-  hide(errorDiv);
-  hide(emptyState);
-  hide(statusBar);
-  hide(loading);
-  hide(vkSetup);
-  nftGrid.innerHTML = "";
 }
 function truncateAddress(addr) {
   return addr.slice(0, 10) + "..." + addr.slice(-6);
@@ -76,12 +88,249 @@ function generateRandomKey() {
   return Array.from(array, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// ── Metadata ──
+
+async function loadMetadata() {
+  try {
+    const resp = await fetch(`${BASE}metadata.json`);
+    if (!resp.ok) throw new Error("not found");
+    const data = await resp.json();
+    metadata = data;
+    hasMetadata = Object.keys(data).length > 0;
+    if (hasMetadata) buildFilterUI();
+  } catch {
+    hasMetadata = false;
+    filterList.innerHTML =
+      '<div class="no-metadata-msg">' +
+      "No metadata found. Run the fetch script to enable traits & filtering:" +
+      "<code>node scripts/fetch-metadata.js</code>" +
+      "</div>";
+  }
+}
+
+function getTokenMeta(tokenId) {
+  return metadata[tokenId] || { name: `Bunny #${tokenId}`, attributes: [] };
+}
+
+// ── Filter UI ──
+
+function buildFilterUI() {
+  const traitMap = {};
+  for (const id of allTokenIds) {
+    const meta = getTokenMeta(id);
+    for (const attr of meta.attributes) {
+      const type = attr.trait_type;
+      const val = attr.value;
+      if (!traitMap[type]) traitMap[type] = {};
+      traitMap[type][val] = (traitMap[type][val] || 0) + 1;
+    }
+  }
+
+  const sortedTypes = Object.keys(traitMap).sort();
+  filterList.innerHTML = "";
+
+  for (const type of sortedTypes) {
+    const values = Object.entries(traitMap[type]).sort(
+      ([, a], [, b]) => b - a
+    );
+
+    const group = document.createElement("div");
+    group.className = "filter-group";
+
+    const header = document.createElement("div");
+    header.className = "filter-group-header";
+    header.innerHTML = `<h3>${type}</h3><span class="chevron">▼</span>`;
+    header.addEventListener("click", () => group.classList.toggle("collapsed"));
+
+    const options = document.createElement("div");
+    options.className = "filter-options";
+
+    for (const [val, count] of values) {
+      const label = document.createElement("label");
+      label.className = "filter-option";
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.dataset.traitType = type;
+      cb.dataset.traitValue = val;
+      cb.addEventListener("change", onFilterChange);
+
+      const text = document.createTextNode(val);
+      const countSpan = document.createElement("span");
+      countSpan.className = "count";
+      countSpan.textContent = count;
+
+      label.append(cb, text, countSpan);
+      options.appendChild(label);
+    }
+
+    group.append(header, options);
+    filterList.appendChild(group);
+  }
+}
+
+function onFilterChange() {
+  activeFilters = {};
+  const checkboxes = filterList.querySelectorAll("input:checked");
+  for (const cb of checkboxes) {
+    const type = cb.dataset.traitType;
+    const val = cb.dataset.traitValue;
+    if (!activeFilters[type]) activeFilters[type] = new Set();
+    activeFilters[type].add(val);
+  }
+
+  const hasFilters = Object.keys(activeFilters).length > 0;
+  btnClearFilters.classList.toggle("visible", hasFilters);
+  renderGrid();
+}
+
+function clearFilters() {
+  const checkboxes = filterList.querySelectorAll("input:checked");
+  for (const cb of checkboxes) cb.checked = false;
+  activeFilters = {};
+  btnClearFilters.classList.remove("visible");
+  renderGrid();
+}
+
+function tokenMatchesFilters(tokenId) {
+  if (showOnlyOwned && !ownedTokens.has(String(tokenId))) return false;
+
+  if (searchQuery) {
+    const q = searchQuery;
+    const id = String(tokenId);
+    const name = getTokenMeta(tokenId).name.toLowerCase();
+    if (!id.includes(q) && !name.includes(q)) return false;
+  }
+
+  const filterTypes = Object.keys(activeFilters);
+  if (filterTypes.length === 0) return true;
+
+  const meta = getTokenMeta(tokenId);
+  const attrMap = {};
+  for (const a of meta.attributes) {
+    attrMap[a.trait_type] = a.value;
+  }
+
+  for (const type of filterTypes) {
+    const allowed = activeFilters[type];
+    if (!allowed.has(attrMap[type])) return false;
+  }
+  return true;
+}
+
+// ── Rendering ──
+
+function renderGrid() {
+  nftGrid.innerHTML = "";
+  const fragment = document.createDocumentFragment();
+  let count = 0;
+
+  for (const tokenId of allTokenIds) {
+    if (!tokenMatchesFilters(tokenId)) continue;
+    fragment.appendChild(createCard(tokenId));
+    count++;
+  }
+
+  if (count === 0) {
+    show(emptyState);
+  } else {
+    hide(emptyState);
+  }
+
+  nftGrid.appendChild(fragment);
+  resultCount.textContent = count;
+}
+
+function createCard(tokenId) {
+  const meta = getTokenMeta(tokenId);
+  const card = document.createElement("div");
+  card.className = "nft-card";
+  if (ownedTokens.has(String(tokenId))) card.classList.add("owned");
+
+  const img = document.createElement("img");
+  img.src = `${BASE}allBunnies/${tokenId}.webp`;
+  img.alt = meta.name;
+  img.loading = "lazy";
+  img.onerror = () => {
+    img.style.display = "none";
+    const ph = document.createElement("div");
+    ph.style.cssText =
+      "width:100%;aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:var(--surface-hover);color:var(--text-muted);font-size:0.8rem;";
+    ph.textContent = "Image not found";
+    card.insertBefore(ph, card.firstChild);
+  };
+
+  const info = document.createElement("div");
+  info.className = "card-info";
+
+  const name = document.createElement("span");
+  name.className = "card-name";
+  name.textContent = meta.name;
+
+  const id = document.createElement("span");
+  id.className = "card-id";
+  id.textContent = `#${tokenId}`;
+
+  const badge = document.createElement("span");
+  badge.className = "owned-badge";
+  badge.textContent = "OWNED";
+
+  info.append(name, badge, id);
+  card.append(img, info);
+
+  card.addEventListener("click", () => openModal(tokenId));
+  return card;
+}
+
+// ── Modal ──
+
+function openModal(tokenId) {
+  const meta = getTokenMeta(tokenId);
+  modalImage.src = `${BASE}allBunnies/${tokenId}.webp`;
+  modalImage.alt = meta.name;
+  modalName.textContent = meta.name;
+  modalId.textContent = `#${tokenId}`;
+
+  if (meta.attributes.length > 0) {
+    const grid = document.createElement("div");
+    grid.className = "traits-grid";
+    for (const attr of meta.attributes) {
+      const card = document.createElement("div");
+      card.className = "trait-card";
+
+      const type = document.createElement("div");
+      type.className = "trait-type";
+      type.textContent = attr.trait_type;
+
+      const val = document.createElement("div");
+      val.className = "trait-value";
+      val.textContent = attr.value;
+
+      card.append(type, val);
+      grid.appendChild(card);
+    }
+    modalTraits.innerHTML = "";
+    modalTraits.appendChild(grid);
+  } else {
+    modalTraits.innerHTML = '<div class="no-traits">No trait data available</div>';
+  }
+
+  show(modalOverlay);
+  document.body.style.overflow = "hidden";
+}
+
+function closeModal() {
+  hide(modalOverlay);
+  document.body.style.overflow = "";
+}
+
+// ── Keplr / Wallet ──
+
 async function waitForKeplr(timeout = 4000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    if (window.keplr && window.getOfflineSigner && window.getEnigmaUtils) {
+    if (window.keplr && window.getOfflineSigner && window.getEnigmaUtils)
       return true;
-    }
     await new Promise((r) => setTimeout(r, 100));
   }
   return !!window.keplr;
@@ -109,7 +358,6 @@ async function createClientWithFallback(keplrOfflineSigner, address) {
           : hashResult?.code_hash ||
             hashResult?.codeHash ||
             String(hashResult);
-      console.log(`Connected to ${url}, code hash: ${codeHash}`);
       return client;
     } catch (e) {
       console.warn(`Endpoint ${url} failed:`, e.message);
@@ -121,14 +369,12 @@ async function createClientWithFallback(keplrOfflineSigner, address) {
 }
 
 async function connectKeplr() {
-  hideAll();
-  hero.style.display = "none";
+  hide(errorDiv);
 
   const keplrReady = await waitForKeplr();
   if (!keplrReady) {
-    hero.style.display = "";
     showError(
-      "Keplr wallet not detected. Please install the Keplr browser extension and refresh the page."
+      "Keplr wallet not detected. Please install the Keplr browser extension and refresh."
     );
     return;
   }
@@ -140,10 +386,7 @@ async function connectKeplr() {
     await window.keplr.enable(CHAIN_ID);
   } catch {
     hide(loading);
-    hero.style.display = "";
-    showError(
-      "Connection rejected. Please approve the Keplr request and try again."
-    );
+    showError("Connection rejected. Please approve the Keplr request.");
     return;
   }
 
@@ -158,15 +401,15 @@ async function connectKeplr() {
     btnConnect.textContent = "Connected";
     btnConnect.disabled = true;
     btnDisconnect.style.display = "";
+    btnMyNfts.style.display = "";
 
-    loadingText.textContent = "Finding a working network endpoint...";
+    loadingText.textContent = "Finding a working endpoint...";
     secretjs = await createClientWithFallback(keplrOfflineSigner, myAddress);
-
     hide(loading);
 
     const existingKey = getStoredViewingKey(myAddress);
     if (existingKey) {
-      await loadNFTs(existingKey);
+      await loadOwnedNFTs(existingKey);
     } else {
       show(vkSetup);
     }
@@ -178,7 +421,8 @@ async function connectKeplr() {
 }
 
 async function setViewingKey() {
-  hideAll();
+  hide(vkSetup);
+  hide(errorDiv);
   show(loading);
   loadingText.textContent = "Approve the transaction in Keplr...";
 
@@ -190,22 +434,17 @@ async function setViewingKey() {
         contract_address: CONTRACT_ADDRESS,
         code_hash: codeHash,
         sender: myAddress,
-        msg: {
-          set_viewing_key: {
-            key: viewingKey,
-          },
-        },
+        msg: { set_viewing_key: { key: viewingKey } },
       },
       { gasLimit: 50_000 }
     );
 
-    if (tx.code !== 0) {
+    if (tx.code !== 0)
       throw new Error(tx.rawLog || "Transaction failed on-chain");
-    }
 
     storeViewingKey(myAddress, viewingKey);
     loadingText.textContent = "Viewing key set! Loading your NFTs...";
-    await loadNFTs(viewingKey);
+    await loadOwnedNFTs(viewingKey);
   } catch (e) {
     hide(loading);
     console.error("Set viewing key error:", e);
@@ -219,29 +458,17 @@ async function setViewingKey() {
   }
 }
 
-async function loadNFTs(viewingKey) {
+async function loadOwnedNFTs(viewingKey) {
   show(loading);
   hide(errorDiv);
-  hide(emptyState);
-  hide(statusBar);
   hide(vkSetup);
-  nftGrid.innerHTML = "";
-
   loadingText.textContent = "Querying your NFTs...";
 
   try {
-    const allTokens = await queryAllTokens(viewingKey);
-
+    const tokens = await queryAllTokens(viewingKey);
+    ownedTokens = new Set(tokens);
     hide(loading);
-
-    if (allTokens.length === 0) {
-      show(emptyState);
-      return;
-    }
-
-    nftCount.textContent = allTokens.length;
-    show(statusBar);
-    renderNFTs(allTokens);
+    renderGrid();
   } catch (e) {
     hide(loading);
     console.error("Query error:", e);
@@ -275,9 +502,7 @@ async function queryAllTokens(viewingKey) {
       viewing_key: viewingKey,
       limit,
     };
-    if (startAfter) {
-      tokensQuery.start_after = startAfter;
-    }
+    if (startAfter) tokensQuery.start_after = startAfter;
 
     const result = await secretjs.query.compute.queryContract({
       contract_address: CONTRACT_ADDRESS,
@@ -287,12 +512,10 @@ async function queryAllTokens(viewingKey) {
 
     const tokens =
       result?.token_list?.tokens || result?.tokens?.tokens || [];
-
     if (tokens.length === 0) break;
 
     allTokens.push(...tokens);
     loadingText.textContent = `Found ${allTokens.length} NFTs so far...`;
-
     if (tokens.length < limit) break;
     startAfter = tokens[tokens.length - 1];
   }
@@ -300,69 +523,65 @@ async function queryAllTokens(viewingKey) {
   return allTokens;
 }
 
-function renderNFTs(tokens) {
-  const fragment = document.createDocumentFragment();
-
-  const sorted = [...tokens].sort((a, b) => {
-    const numA = parseInt(a, 10);
-    const numB = parseInt(b, 10);
-    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
-    return a.localeCompare(b);
-  });
-
-  for (const tokenId of sorted) {
-    const card = document.createElement("div");
-    card.className = "nft-card";
-
-    const img = document.createElement("img");
-    const base = import.meta.env.BASE_URL;
-    img.src = `${base}allBunnies/${tokenId}.webp`;
-    img.alt = `Redacted Club #${tokenId}`;
-    img.loading = "lazy";
-    img.onerror = () => {
-      img.style.display = "none";
-      const placeholder = document.createElement("div");
-      placeholder.style.cssText =
-        "width:100%;aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:var(--surface-hover);color:var(--text-muted);font-size:0.85rem;";
-      placeholder.textContent = "Image not found";
-      card.insertBefore(placeholder, card.firstChild);
-    };
-
-    const info = document.createElement("div");
-    info.className = "card-info";
-
-    const name = document.createElement("span");
-    name.className = "card-name";
-    name.textContent = "Bunny";
-
-    const id = document.createElement("span");
-    id.className = "card-id";
-    id.textContent = `#${tokenId}`;
-
-    info.appendChild(name);
-    info.appendChild(id);
-    card.appendChild(img);
-    card.appendChild(info);
-    fragment.appendChild(card);
-  }
-
-  nftGrid.appendChild(fragment);
-}
-
 function disconnect() {
   secretjs = null;
   myAddress = null;
   codeHash = null;
+  ownedTokens = new Set();
+  showOnlyOwned = false;
 
-  hideAll();
   hide(addressBadge);
+  hide(vkSetup);
+  hide(errorDiv);
   btnConnect.textContent = "Connect Keplr";
   btnConnect.disabled = false;
   btnDisconnect.style.display = "none";
-  hero.style.display = "";
+  btnMyNfts.style.display = "none";
+  btnMyNfts.classList.remove("active");
+  renderGrid();
+}
+
+function toggleMyNfts() {
+  showOnlyOwned = !showOnlyOwned;
+  btnMyNfts.classList.toggle("active", showOnlyOwned);
+  btnMyNfts.textContent = showOnlyOwned ? "All NFTs" : "My NFTs";
+  renderGrid();
+}
+
+// ── Init ──
+
+async function init() {
+  totalCount.textContent = TOTAL_TOKENS;
+  show(loading);
+  loadingText.textContent = "Loading collection...";
+
+  await loadMetadata();
+
+  hide(loading);
+  renderGrid();
 }
 
 btnConnect.addEventListener("click", connectKeplr);
-btnConnectHero.addEventListener("click", connectKeplr);
 btnDisconnect.addEventListener("click", disconnect);
+btnMyNfts.addEventListener("click", toggleMyNfts);
 btnSetVk.addEventListener("click", setViewingKey);
+btnClearFilters.addEventListener("click", clearFilters);
+
+searchInput.addEventListener("input", (e) => {
+  searchQuery = e.target.value.trim().toLowerCase();
+  renderGrid();
+});
+
+modalClose.addEventListener("click", closeModal);
+modalOverlay.addEventListener("click", (e) => {
+  if (e.target === modalOverlay) closeModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeModal();
+});
+
+sidebarToggle.addEventListener("click", () => {
+  sidebar.classList.toggle("open");
+});
+
+init();
